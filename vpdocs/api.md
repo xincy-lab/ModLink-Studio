@@ -6,10 +6,10 @@
 
 如果目标是安装和运行宿主应用，先看 [安装与发布](/install)；如果目标是开发 driver，先看 [SDK 开发者指南](/sdk)。
 
-当前 API 说明以 `0.3.2rc1` 主线为准：
+当前 API 说明以 `0.3.2rc2` 主线为准：
 
 - `modlink_sdk` / `modlink_core` 已经是纯 Python runtime
-- SDK / driver API 仍处于早期阶段，`0.3.2rc1` 不保证兼容 `0.2.x` driver 实现
+- SDK / driver API 仍处于早期阶段，`0.3.2rc2` 不保证兼容 `0.2.x` driver 实现
 - 当前桌面 UI 包以 `modlink_ui` 为准
 - 插件管理 CLI 当前随 `modlink_studio` 一起分发
 

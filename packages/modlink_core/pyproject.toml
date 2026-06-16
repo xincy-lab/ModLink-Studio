@@ -1,6 +1,6 @@
 [project]
 name = "modlink-core"
-version = "0.3.2rc1"
+version = "0.3.2rc2"
 description = "Runtime services and engine for ModLink"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]

@@ -6,7 +6,7 @@ Core 层负责的是“driver 发出的流怎么进入系统、怎么路由、�
 
 - UI 和应用层依赖 Core 暴露出来的稳定流模型，而不是直接依赖设备协议
 
-当前文档以 `0.3.2rc1` 主线为准。`modlink_core` 已经是纯 Python runtime，不再依赖 `QThread`、Qt signal 或其他 Qt runtime 兼容层。
+当前文档以 `0.3.2rc2` 主线为准。`modlink_core` 已经是纯 Python runtime，不再依赖 `QThread`、Qt signal 或其他 Qt runtime 兼容层。
 
 ## Core 负责什么
 

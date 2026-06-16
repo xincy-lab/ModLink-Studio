@@ -2,6 +2,18 @@
 
 本文件记录 ModLink Studio 的重要变更。
 
+## [0.3.2rc2] - 2026-06-16
+
+### Summary
+
+`0.3.2rc2` 在 `0.3.2rc1` 基础上新增 server CLI 参数化，其余内容与 `0.3.2rc1` 一致。
+
+### Added
+
+- `modlink-server` 入口新增 `--host` / `--port` CLI 参数，支持自定义监听地址
+
+---
+
 ## [0.3.2rc1] - 2026-06-08
 
 ### Summary
