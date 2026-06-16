@@ -1,6 +1,6 @@
 [project]
 name = "modlink-studio"
-version = "0.3.2rc2"
+version = "0.3.2"
 description = "Host application bundle for ModLink Studio"
 readme = "README.md"
 license = "GPL-3.0-or-later"

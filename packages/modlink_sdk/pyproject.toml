@@ -1,6 +1,6 @@
 [project]
 name = "modlink-sdk"
-version = "0.3.2rc2"
+version = "0.3.2"
 description = "Shared SDK contracts and data models for ModLink"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]

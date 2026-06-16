@@ -1,6 +1,6 @@
 [project]
 name = "modlink_ui"
-version = "0.3.2rc2"
+version = "0.3.2"
 description = "Feature-oriented Qt Widgets UI components for ModLink"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]

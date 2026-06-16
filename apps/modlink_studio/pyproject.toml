@@ -1,6 +1,6 @@
 [project]
 name = "modlink-studio-internal"
-version = "0.3.2rc2"
+version = "0.3.2"
 description = "Internal packaging stub for the Qt Widgets ModLink Studio host"
 license = "GPL-3.0-or-later"
 license-files = ["LICENSE"]

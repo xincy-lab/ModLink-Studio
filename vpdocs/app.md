@@ -16,7 +16,7 @@ App 层负责把已经存在的 SDK、Core、UI 和 bridge 装配成真正可启
 
 ## 启动入口
 
-正式安装方式见 [安装与发布](/install)。`0.3.2rc2` 的主桌面宿主入口是：
+正式安装方式见 [安装与发布](/install)。`0.3.2` 的主桌面宿主入口是：
 
 ```bash
 modlink-studio
