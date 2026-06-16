@@ -1,6 +1,6 @@
 [project]
 name = "modlink-studio"
-version = "0.3.1"
+version = "0.3.2"
 description = "Host application bundle for ModLink Studio"
 readme = "README.md"
 license = "GPL-3.0-or-later"
@@ -10,6 +10,7 @@ dependencies = [
     "numpy>=2.3.3",
     "packaging>=25.0",
     "platformdirs>=4.9.4",
+    "pillow>=11.2.1",
     "pyqt6>=6.10.2,<6.11",
     "pyqt6-qt6>=6.10.2,<6.11",
     "pyqt6-fluent-widgets>=1.11.1",
@@ -20,6 +21,7 @@ dependencies = [
     "uvicorn>=0.37.0",
     "typer>=0.15.0",
     "pydantic>=2.0.0",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [project.urls]

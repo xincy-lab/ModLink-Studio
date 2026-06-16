@@ -3,7 +3,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
     lang: 'zh-CN',
     title: 'ModLink Studio',
-    description: '面向设备接入、多模态采集与展示的 0.3.0 文档站',
+    description: '面向设备接入、多模态采集与展示的 0.3.2rc1 文档站',
     head: [
         ['link', { rel: 'icon', href: '/favicon.ico' }],
     ],
@@ -44,7 +44,7 @@ export default defineConfig({
             ],
         },
         footer: {
-            message: 'Docs track the ModLink Studio 0.3.0 PyPI release; TestPyPI is rehearsal-only.',
+            message: 'Docs track the ModLink Studio 0.3.2rc1 release candidate; TestPyPI is rehearsal-only.',
             copyright: 'Copyright © 2026',
         },
         socialLinks: [

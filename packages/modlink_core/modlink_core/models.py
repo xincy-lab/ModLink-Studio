@@ -57,6 +57,10 @@ class ReplayRecordingSummary:
     stream_ids: tuple[str, ...]
     session_name: str | None = None
     experiment_name: str | None = None
+    started_at_ns: int | None = None
+    duration_ns: int | None = None
+    status: str | None = None
+    total_frames: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,8 +80,8 @@ class ReplaySegment:
 class ExportJobSnapshot:
     job_id: str
     recording_id: str
-    format_id: str
     state: str
     progress: float
     output_path: str | None
     error: str | None
+    request_summary: str = ""

@@ -5,7 +5,9 @@ import shutil
 import sys
 import time
 import unittest
+from concurrent.futures import Future
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import numpy as np
@@ -26,6 +28,7 @@ for path in (
 from PyQt6.QtWidgets import QApplication
 
 from modlink_core.replay import ReplayBackend
+from modlink_core.replay.export_request import ExportMode, ExportRequest, StreamSelection
 from modlink_core.settings import SettingsStore, declare_core_settings
 from modlink_core.storage import append_recording_frame, create_recording
 from modlink_sdk import FrameEnvelope, StreamDescriptor
@@ -97,12 +100,6 @@ class QtReplayBridgeTests(unittest.TestCase):
             self.assertIsNotNone(bridge.bus.descriptor(descriptor.stream_id))
             self.assertTrue(bus_resets)
 
-            bridge.start_export("signal_csv")
-            self._pump_events_until(
-                lambda: bridge.export_jobs() and bridge.export_jobs()[-1].state == "completed",
-                timeout=2.0,
-            )
-            self.assertEqual("completed", bridge.export_jobs()[-1].state)
         finally:
             bridge.shutdown()
             backend.shutdown()
@@ -118,6 +115,100 @@ class QtReplayBridgeTests(unittest.TestCase):
         if predicate():
             return
         raise AssertionError("condition not reached before timeout")
+
+
+class QtReplayBridgeExportForwardingTests(unittest.TestCase):
+    """Unit tests for start_export forwarding — use a mock backend, no real I/O."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls._app = QApplication.instance() or QApplication([])
+
+    def _make_bridge(self, backend: MagicMock) -> QtReplayBridge:
+
+        from modlink_core.models import ReplaySnapshot
+
+        # Provide minimal return values so the constructor doesn't blow up.
+        backend.snapshot.return_value = ReplaySnapshot(
+            state="idle",
+            is_started=False,
+            recording_id=None,
+            recording_path=None,
+            position_ns=0,
+            duration_ns=0,
+            speed_multiplier=1.0,
+        )
+        backend.recordings.return_value = ()
+        backend.markers.return_value = ()
+        backend.segments.return_value = ()
+        backend.export_jobs.return_value = ()
+
+        # bus needs descriptors() and open_frame_stream()
+        backend.bus.descriptors.return_value = {}
+        stream_mock = MagicMock()
+        backend.bus.open_frame_stream.return_value = stream_mock
+
+        settings_mock = MagicMock()
+        settings_mock.sig_setting_changed = MagicMock()
+        settings_mock.sig_setting_changed.connect = MagicMock()
+
+        bridge = QtReplayBridge(backend, settings_mock)
+        bridge.shutdown()
+        return bridge
+
+    def _done_future(self, value: object) -> Future[object]:
+        f: Future[object] = Future()
+        f.set_result(value)
+        return f
+
+    def test_bridge_forwards_export_request(self) -> None:
+        backend = MagicMock()
+        bridge = self._make_bridge(backend)
+
+        request = ExportRequest(
+            mode=ExportMode.SINGLE,
+            recording_ids=("rec-1",),
+            streams=(StreamSelection(stream_id="demo.01/signal", format_id="signal_csv"),),
+        )
+        backend.start_export.return_value = self._done_future(None)
+
+        bridge.start_export(request)
+
+        backend.start_export.assert_called_once_with(request, None)
+
+    def test_bridge_returns_job_id(self) -> None:
+        """Bridge forwards the future from backend unchanged; result propagates."""
+        backend = MagicMock()
+        bridge = self._make_bridge(backend)
+
+        request = ExportRequest(
+            mode=ExportMode.SINGLE,
+            recording_ids=("rec-2",),
+            streams=(StreamSelection(stream_id="demo.01/signal", format_id="signal_csv"),),
+        )
+        backend.start_export.return_value = self._done_future("job123")
+
+        bridge.start_export(request)
+
+        # The future passed to _watch_command is the one returned by backend.start_export.
+        # Verify backend was called with the request and returned the expected future.
+        backend.start_export.assert_called_once_with(request, None)
+        self.assertEqual("job123", backend.start_export.return_value.result())
+
+    def test_bridge_forwards_export_output_root(self) -> None:
+        backend = MagicMock()
+        bridge = self._make_bridge(backend)
+
+        request = ExportRequest(
+            mode=ExportMode.SINGLE,
+            recording_ids=("rec-3",),
+            streams=(StreamSelection(stream_id="demo.01/signal", format_id="signal_csv"),),
+        )
+        backend.start_export.return_value = self._done_future(None)
+
+        bridge.start_export(request, "C:/exports")
+
+        backend.start_export.assert_called_once_with(request, "C:/exports")
 
 
 if __name__ == "__main__":

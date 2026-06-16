@@ -2,6 +2,83 @@
 
 本文件记录 ModLink Studio 的重要变更。
 
+## [0.3.2] - 2026-06-16
+
+### Summary
+
+`0.3.2` 在 `0.3.1` 稳定性修订基础上补齐 replay seek、recording manifest 元数据和录制导出体验。公开安装入口仍是单主包 `modlink-studio`，SDK / driver API 仍处于早期阶段。
+
+### Added
+
+- replay 时间轴支持滑块拖动和点击 seek，长录制 seek 使用 `qint64` 信号避免纳秒值溢出
+- recording 停止或失败时在 `recording.json` 落盘开始/结束时间、状态、持续时间和各 stream 帧数
+- replay recordings 列表 tooltip 展示录制时长、帧数、状态、session 和 experiment 信息
+- 导出路径接入按 recording 组织的 bundle 输出，支持单录制、多录制和时间切片导出
+- 根包补齐 `pillow` 依赖，确保 PNG / ZIP 图像导出 formatter 在主包环境可用
+- `modlink-server` 入口新增 `--host` / `--port` CLI 参数，支持自定义监听地址
+
+### Fixed
+
+- 修复 replay seek 后 stale snapshot 把滑块短暂拉回旧位置的竞态
+- 修复时间切片导出使用相对 UI 时间却按绝对 frame timestamp 过滤的问题
+- 修复导出对话框选择的输出目录未传入 backend 的问题
+- 修复 UI 导出成功但旧 `ExportService` 只创建空目录的问题
+
+### Changed
+
+- 导出对话框暂时隐藏未实现的 raw 副本和 zip 打包选项，避免发布候选版暴露误导性控件
+
+### Known Limitations
+
+- 跨录制单流导出已有 core handler，但当前 widgets UI 暂未提供专门入口
+- 导出任务历史持久化、打开输出文件夹按钮、schema version / checksum / lineage 不属于 `0.3.2` 范围
+
+---
+
+## [0.3.2rc2] - 2026-06-16
+
+### Summary
+
+`0.3.2rc2` 在 `0.3.2rc1` 基础上新增 server CLI 参数化，其余内容与 `0.3.2rc1` 一致。
+
+### Added
+
+- `modlink-server` 入口新增 `--host` / `--port` CLI 参数，支持自定义监听地址
+
+---
+
+## [0.3.2rc1] - 2026-06-08
+
+### Summary
+
+`0.3.2rc1` 是 `0.3.2` 的 release candidate，重点补齐 replay seek、recording manifest 元数据和录制导出体验。公开安装入口仍是单主包 `modlink-studio`，SDK / driver API 仍处于早期阶段。
+
+### Added
+
+- replay 时间轴支持滑块拖动和点击 seek，长录制 seek 使用 `qint64` 信号避免纳秒值溢出
+- recording 停止或失败时在 `recording.json` 落盘开始/结束时间、状态、持续时间和各 stream 帧数
+- replay recordings 列表 tooltip 展示录制时长、帧数、状态、session 和 experiment 信息
+- 导出路径接入按 recording 组织的 bundle 输出，支持单录制、多录制和时间切片导出
+- 根包补齐 `pillow` 依赖，确保 PNG / ZIP 图像导出 formatter 在主包环境可用
+
+### Fixed
+
+- 修复 replay seek 后 stale snapshot 把滑块短暂拉回旧位置的竞态
+- 修复时间切片导出使用相对 UI 时间却按绝对 frame timestamp 过滤的问题
+- 修复导出对话框选择的输出目录未传入 backend 的问题
+- 修复 UI 导出成功但旧 `ExportService` 只创建空目录的问题
+
+### Changed
+
+- 导出对话框暂时隐藏未实现的 raw 副本和 zip 打包选项，避免发布候选版暴露误导性控件
+
+### Known Limitations
+
+- 跨录制单流导出已有 core handler，但当前 widgets UI 暂未提供专门入口
+- 导出任务历史持久化、打开输出文件夹按钮、schema version / checksum / lineage 不属于 `0.3.2rc1` 范围
+
+---
+
 ## [0.3.1] - 2026-05-26
 
 ### Summary

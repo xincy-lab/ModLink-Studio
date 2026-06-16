@@ -56,6 +56,12 @@ class ImageStreamView(BaseStreamView):
         self._latest_image = image
         return True
 
+    def clear(self) -> None:
+        super().clear()
+        self._latest_image = None
+        self._image_item.clear()
+        self._last_shape = None
+
     def _render(self) -> None:
         if self._latest_image is None:
             return

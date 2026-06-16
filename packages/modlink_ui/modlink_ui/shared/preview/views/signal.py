@@ -428,6 +428,16 @@ class SignalStreamView(BaseStreamView):
         )
         self._plot_signature = None
 
+    def clear(self) -> None:
+        super().clear()
+        self._pipeline.reset_states()
+        if self._ring_buffer is not None:
+            self._ring_buffer.clear()
+        # Clear all visible curves so old data disappears from the plot
+        for plot_bundle in self._plot_bundles:
+            for curve in plot_bundle.curves:
+                curve.setData([], [])
+
     def _ingest_frame(self, frame: FrameEnvelope) -> bool:
         data = np.asarray(frame.data)
         if data.ndim != 2:

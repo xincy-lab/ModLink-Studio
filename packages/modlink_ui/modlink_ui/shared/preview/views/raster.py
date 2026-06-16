@@ -103,6 +103,13 @@ class RasterStreamView(BaseStreamView):
         self._line_length = int(line_length)
         return True
 
+    def clear(self) -> None:
+        super().clear()
+        self._line_buffer.clear()
+        self._line_length = 0
+        self._image_item.clear()
+        self._last_shape = None
+
     def _render(self) -> None:
         if not self._line_buffer or self._line_length <= 0:
             return

@@ -25,10 +25,10 @@ for path in (
         sys.path.insert(0, path_str)
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QAbstractItemView, QApplication
+from PyQt6.QtWidgets import QApplication
 from qfluentwidgets import MessageBox
 
-from modlink_core.models import ReplayMarker, ReplaySegment, ReplaySnapshot
+from modlink_core.models import ReplaySnapshot
 from modlink_core.replay import ReplayBackend
 from modlink_core.settings import SettingsStore, declare_core_settings
 from modlink_core.storage import (
@@ -40,7 +40,7 @@ from modlink_core.storage import (
 from modlink_sdk import FrameEnvelope, StreamDescriptor
 from modlink_ui.bridge import QtReplayBridge, QtSettingsBridge
 from modlink_ui.features.replay import ReplayPage
-from modlink_ui.features.replay.timeline import ReplayAnnotationTimeline
+from modlink_ui.features.replay.player_page import parse_time_text
 
 
 class _EngineStub:
@@ -135,7 +135,6 @@ class ReplayPageTests(unittest.TestCase):
         try:
             recordings_page = page._recordings_page
             player_page = page._player_page
-            export_page = page._export_page
             self.assertEqual("recordings", page._route)
             self.assertEqual("打开", recordings_page.open_button.text())
             self.assertEqual("刷新", recordings_page.refresh_button.text())
@@ -162,61 +161,35 @@ class ReplayPageTests(unittest.TestCase):
             self._pump_events_until(lambda: player_page.transport_bar.isVisible())
             self.assertIs(player_page.transport_bar.parentWidget(), player_page)
             self.assertEqual(3, player_page.header_action_layout.count())
-            self.assertGreater(player_page._floating_panel_spacer.height(), 0)
+            self.assertGreater(player_page._floating_spacer.height(), 0)
             self.assertTrue(player_page.export_route_button.isEnabled())
-            self.assertIs(player_page.preview_panel.parentWidget(), player_page.playback_panel)
+            self.assertIs(player_page.preview_panel.parentWidget(), player_page.scroll_widget)
             self.assertEqual("列表", player_page.recordings_route_button.text())
             self.assertEqual("导出", player_page.export_route_button.text())
             self.assertEqual(0, player_page.recordings_route_button.minimumHeight())
             self.assertEqual(0, player_page.export_route_button.minimumHeight())
-            self.assertEqual("播放", player_page.play_button.text())
-            self.assertEqual("复位", player_page.pause_reset_button.text())
-            self.assertEqual(0, player_page.play_button.minimumHeight())
-            self.assertEqual(0, player_page.pause_reset_button.minimumHeight())
+            self.assertEqual("播放", player_page.play_pause_button.text())
+            self.assertEqual("复位", player_page.reset_button.text())
+            self.assertEqual(0, player_page.play_pause_button.minimumHeight())
+            self.assertEqual(0, player_page.reset_button.minimumHeight())
             self.assertFalse(player_page.recordings_route_button.icon().isNull())
             self.assertFalse(player_page.export_route_button.icon().isNull())
             self.assertEqual(
                 Qt.AlignmentFlag.AlignCenter,
-                player_page.playback_panel.position_badge.alignment(),
+                player_page.position_label.alignment(),
             )
-            badge_center_y = player_page.playback_panel.position_badge.geometry().center().y()
-            play_center_y = player_page.play_button.geometry().center().y()
+            badge_center_y = player_page.position_label.geometry().center().y()
+            play_center_y = player_page.play_pause_button.geometry().center().y()
             self.assertLess(abs(badge_center_y - play_center_y), 8)
 
-            player_page.play_button.click()
+            player_page.play_pause_button.click()
             self._pump_events_until(
                 lambda: replay_bridge.snapshot().state in {"playing", "finished"},
                 timeout=2.0,
             )
 
-            page._show_export_page()
-            self.assertEqual("export", page._route)
-            self._pump_events_until(lambda: not player_page.transport_bar.isVisible())
-            self.assertEqual(2, export_page.header_action_layout.count())
-            self.assertTrue(export_page.player_route_button.isVisible())
-            self.assertTrue(export_page.recordings_route_button.isVisible())
-            self.assertEqual("列表", export_page.recordings_route_button.text())
-            self.assertEqual("回放", export_page.player_route_button.text())
-            self.assertEqual(0, export_page.recordings_route_button.minimumHeight())
-            self.assertEqual(0, export_page.player_route_button.minimumHeight())
-            self.assertEqual(0, export_page.export_button.minimumHeight())
-            self.assertEqual(
-                QAbstractItemView.SelectionMode.SingleSelection,
-                export_page.jobs_list.selectionMode(),
-            )
-            self.assertEqual(2, export_page.content_layout.count())
-            self.assertEqual(1, export_page.content_layout.stretch(1))
-            self.assertFalse(hasattr(export_page, "summary_card"))
-            export_page.export_button.click()
-            self._pump_events_until(lambda: export_page.jobs_list.count() == 1, timeout=2.0)
-            self._pump_events_until(
-                lambda: (
-                    replay_bridge.export_jobs()
-                    and replay_bridge.export_jobs()[-1].state == "completed"
-                ),
-                timeout=2.0,
-            )
-            self.assertEqual(1, export_page.jobs_list.count())
+            # Export is now dialog-based; verify the export button signal is wired
+            self.assertFalse(hasattr(page, "_export_page"))
         finally:
             page.close()
             replay_bridge.shutdown()
@@ -449,6 +422,11 @@ class ReplayPageTests(unittest.TestCase):
             backend.shutdown()
 
     def test_snapshot_highlights_latest_marker_and_active_segment(self) -> None:
+        """Annotations are no longer rendered in the UI (timeline widget removed).
+
+        This test verifies that opening a recording with markers/segments
+        does not crash and that the player page applies the snapshot correctly.
+        """
         descriptor = self._descriptor()
         recording_id = self._create_recording(
             descriptor,
@@ -482,8 +460,8 @@ class ReplayPageTests(unittest.TestCase):
             )
             self._pump_events_until(
                 lambda: (
-                    page._player_page.timeline.marker_count == 2
-                    and page._player_page.timeline.segment_count == 1
+                    replay_bridge.snapshot().recording_id == recording_id
+                    and page._route == "player"
                 )
             )
 
@@ -500,8 +478,8 @@ class ReplayPageTests(unittest.TestCase):
             )
 
             self.assertFalse(hasattr(page._player_page, "annotations_card"))
-            self.assertEqual(1, page._player_page.timeline.active_marker_index)
-            self.assertEqual(0, page._player_page.timeline.active_segment_index)
+            # Slider should reflect the position (600/1000 = 60% of range 0-10000 = 6000)
+            self.assertEqual(6000, page._player_page.slider.value())
         finally:
             page.close()
             replay_bridge.shutdown()
@@ -532,10 +510,10 @@ class ReplayPageTests(unittest.TestCase):
                 )
             )
 
-            self.assertEqual("播放", player_page.play_button.text())
-            self.assertEqual("复位", player_page.pause_reset_button.text())
-            self.assertEqual("复位", player_page.pause_reset_button.toolTip())
-            self.assertFalse(player_page.pause_reset_button.isEnabled())
+            self.assertEqual("播放", player_page.play_pause_button.text())
+            self.assertEqual("复位", player_page.reset_button.text())
+            self.assertEqual("复位", player_page.reset_button.toolTip())
+            self.assertTrue(player_page.reset_button.isEnabled())
 
             calls: list[str] = []
             player_page.sig_pause_requested.connect(lambda: calls.append("pause"))
@@ -551,10 +529,10 @@ class ReplayPageTests(unittest.TestCase):
                 speed_multiplier=1.0,
             )
             page._on_snapshot_changed(playing_snapshot)
-            self.assertEqual("暂停", player_page.pause_reset_button.text())
-            self.assertEqual("暂停", player_page.pause_reset_button.toolTip())
-            self.assertTrue(player_page.pause_reset_button.isEnabled())
-            player_page.pause_reset_button.click()
+            self.assertEqual("暂停", player_page.play_pause_button.text())
+            self.assertEqual("暂停", player_page.play_pause_button.toolTip())
+            self.assertTrue(player_page.play_pause_button.isEnabled())
+            player_page.play_pause_button.click()
             self.assertEqual(["pause"], calls)
 
             paused_snapshot = ReplaySnapshot(
@@ -567,53 +545,248 @@ class ReplayPageTests(unittest.TestCase):
                 speed_multiplier=1.0,
             )
             page._on_snapshot_changed(paused_snapshot)
-            self.assertEqual("复位", player_page.pause_reset_button.text())
-            self.assertEqual("复位", player_page.pause_reset_button.toolTip())
-            self.assertTrue(player_page.pause_reset_button.isEnabled())
-            player_page.pause_reset_button.click()
+            self.assertEqual("复位", player_page.reset_button.text())
+            self.assertEqual("复位", player_page.reset_button.toolTip())
+            self.assertTrue(player_page.reset_button.isEnabled())
+            player_page.reset_button.click()
             self.assertEqual(["pause", "stop"], calls)
         finally:
             page.close()
             replay_bridge.shutdown()
             backend.shutdown()
 
-    def test_timeline_handles_empty_state_and_short_segments(self) -> None:
-        timeline = ReplayAnnotationTimeline()
-        timeline.resize(480, 64)
-        timeline.show()
+    def test_slider_and_time_input_basic(self) -> None:
+        """Verify the slider and time input exist and parse_time_text works."""
+        self.assertEqual(0, parse_time_text("00:00.000"))
+        self.assertEqual(5_000_000_000, parse_time_text("00:05.000"))
+        self.assertEqual(63_456_000_000, parse_time_text("01:03.456"))
+        self.assertEqual(3_723_100_000_000, parse_time_text("01:02:03.100"))
+        self.assertIsNone(parse_time_text(""))
+        self.assertIsNone(parse_time_text("abc"))
+
+    def test_slider_track_click_emits_seek(self) -> None:
+        """Clicking the slider track (not dragging the handle) should emit sig_seek_requested."""
+        descriptor = self._descriptor()
+        recording_id = self._create_recording(descriptor, recording_label="click_seek")
+
+        backend = ReplayBackend(settings=self._settings)
+        backend.start()
+        replay_bridge = QtReplayBridge(backend, self._settings_bridge)
+        page = ReplayPage(_EngineStub(self._settings_bridge, replay_bridge))
+        page.show()
 
         try:
-            timeline.clear()
-            timeline._refresh_geometry()
-            self.assertEqual(0, timeline.marker_count)
-            self.assertEqual(0, timeline.segment_count)
-            self.assertEqual(-1, timeline.active_marker_index)
-            self.assertEqual(-1, timeline.active_segment_index)
-
-            marker = ReplayMarker(timestamp_ns=220_000_000, label="cue")
-            segment = ReplaySegment(
-                start_ns=300_000_000,
-                end_ns=300_400_000,
-                label="blink",
+            self._pump_events_until(lambda: page._recordings_page.recording_list.count() == 1)
+            page._recordings_page.recording_list.setCurrentRow(0)
+            page._recordings_page.open_button.click()
+            self._pump_events_until(
+                lambda: (
+                    replay_bridge.snapshot().recording_id == recording_id
+                    and page._route == "player"
+                )
             )
-            timeline.set_annotations((marker,), (segment,))
-            timeline.set_playback(300_200_000, 1_000_000_000)
-            timeline._refresh_geometry()
 
-            self.assertEqual(1, timeline.marker_count)
-            self.assertEqual(1, timeline.segment_count)
-            self.assertEqual(0, timeline.active_marker_index)
-            self.assertEqual(0, timeline.active_segment_index)
-            self.assertGreaterEqual(
-                timeline._segment_regions[0].width(),
-                timeline._minimum_segment_width,
+            player_page = page._player_page
+            # Set a known snapshot so duration_ns is non-zero
+            page._on_snapshot_changed(
+                ReplaySnapshot(
+                    state="ready",
+                    is_started=True,
+                    recording_id=recording_id,
+                    recording_path=str(self._temp_dir / "recordings" / recording_id),
+                    position_ns=0,
+                    duration_ns=1_000_000_000,
+                    speed_multiplier=1.0,
+                )
             )
-            marker_tooltip = timeline._tooltip_text_at(timeline._marker_regions[0].center())
-            segment_tooltip = timeline._tooltip_text_at(timeline._segment_regions[0].center())
-            self.assertIn("cue", marker_tooltip or "")
-            self.assertIn("blink", segment_tooltip or "")
+
+            seek_positions: list[int] = []
+            player_page.sig_seek_requested.connect(seek_positions.append)
+
+            # Simulate a track click at slider value 5000 (50% of range)
+            player_page.slider.clicked.emit(5000)
+            self._app.processEvents()
+
+            # Should have emitted a seek to 50% of duration = 500_000_000 ns
+            self.assertEqual(1, len(seek_positions))
+            self.assertEqual(500_000_000, seek_positions[0])
         finally:
-            timeline.close()
+            page.close()
+            replay_bridge.shutdown()
+            backend.shutdown()
+
+    def test_slider_seek_signal_carries_qint64_for_long_recordings(self) -> None:
+        """Regression: PyQt's plain `pyqtSignal(int)` is C int32 (max ~2.147s in
+        ns). Recordings longer than that overflow into a negative number, the
+        backend clamps it to 0, and every seek silently plays from the start.
+        The signal MUST be declared with qint64."""
+        descriptor = self._descriptor()
+        recording_id = self._create_recording(descriptor, recording_label="long_seek")
+
+        backend = ReplayBackend(settings=self._settings)
+        backend.start()
+        replay_bridge = QtReplayBridge(backend, self._settings_bridge)
+        page = ReplayPage(_EngineStub(self._settings_bridge, replay_bridge))
+        page.show()
+
+        try:
+            self._pump_events_until(lambda: page._recordings_page.recording_list.count() == 1)
+            page._recordings_page.recording_list.setCurrentRow(0)
+            page._recordings_page.open_button.click()
+            self._pump_events_until(
+                lambda: (
+                    replay_bridge.snapshot().recording_id == recording_id
+                    and page._route == "player"
+                )
+            )
+
+            player_page = page._player_page
+            # 6-second duration: 60% = 3.6s = 3,600,000,000 ns. This exceeds
+            # int32 max (2,147,483,647) and would wrap negative through a
+            # plain `pyqtSignal(int)`.
+            page._on_snapshot_changed(
+                ReplaySnapshot(
+                    state="ready",
+                    is_started=True,
+                    recording_id=recording_id,
+                    recording_path=str(self._temp_dir / "recordings" / recording_id),
+                    position_ns=0,
+                    duration_ns=6_000_000_000,
+                    speed_multiplier=1.0,
+                )
+            )
+
+            received: list[int] = []
+            player_page.sig_seek_requested.connect(received.append)
+
+            # Click at 60% (3.6s): would be -694,967,296 if int32 overflow.
+            player_page.slider.setValue(6000)
+            player_page.slider.clicked.emit(6000)
+            self._app.processEvents()
+
+            self.assertEqual(1, len(received))
+            self.assertEqual(
+                3_600_000_000,
+                received[0],
+                "Signal must carry full qint64 ns value, not int32-truncated",
+            )
+            self.assertGreater(received[0], 0, "Seek position must not wrap negative")
+        finally:
+            page.close()
+            replay_bridge.shutdown()
+            backend.shutdown()
+
+    def test_slider_does_not_snap_back_on_stale_snapshot_after_seek(self) -> None:
+        """After a seek, a stale snapshot (still showing old position) must NOT
+        snap the slider back during the brief suppression window. Once the
+        window expires the slider must resume syncing from snapshots — even if
+        the backend overshoots the seek target during playback (no lock-forever).
+        The label must also update immediately on click so the user sees the
+        seek take effect, not stay frozen at the pre-seek time."""
+        descriptor = self._descriptor()
+        recording_id = self._create_recording(descriptor, recording_label="snap_back")
+
+        backend = ReplayBackend(settings=self._settings)
+        backend.start()
+        replay_bridge = QtReplayBridge(backend, self._settings_bridge)
+        page = ReplayPage(_EngineStub(self._settings_bridge, replay_bridge))
+        page.show()
+
+        try:
+            self._pump_events_until(lambda: page._recordings_page.recording_list.count() == 1)
+            page._recordings_page.recording_list.setCurrentRow(0)
+            page._recordings_page.open_button.click()
+            self._pump_events_until(
+                lambda: (
+                    replay_bridge.snapshot().recording_id == recording_id
+                    and page._route == "player"
+                )
+            )
+
+            player_page = page._player_page
+            # Establish a known starting state: ready, position 0, duration 1s.
+            initial_snapshot = ReplaySnapshot(
+                state="ready",
+                is_started=True,
+                recording_id=recording_id,
+                recording_path=str(self._temp_dir / "recordings" / recording_id),
+                position_ns=0,
+                duration_ns=1_000_000_000,
+                speed_multiplier=1.0,
+            )
+            page._on_snapshot_changed(initial_snapshot)
+            self.assertEqual(0, player_page.slider.value())
+            self.assertEqual("00:00.000 / 00:01.000", player_page.position_label.text())
+
+            # User clicks the track at 50%. In the real qfluentwidgets.Slider,
+            # mousePressEvent calls setValue() before emitting clicked.
+            player_page.slider.setValue(5000)
+            player_page.slider.clicked.emit(5000)
+            self._app.processEvents()
+            self.assertEqual(5000, player_page.slider.value())
+            # Label must update immediately on click — no waiting for backend.
+            self.assertEqual(
+                "00:00.500 / 00:01.000",
+                player_page.position_label.text(),
+                "Label must reflect the click target immediately",
+            )
+
+            # Stale snapshot arrives (poll timer fired before backend processed seek).
+            stale_snapshot = ReplaySnapshot(
+                state="ready",
+                is_started=True,
+                recording_id=recording_id,
+                recording_path=str(self._temp_dir / "recordings" / recording_id),
+                position_ns=0,  # Still old position.
+                duration_ns=1_000_000_000,
+                speed_multiplier=1.0,
+            )
+            page._on_snapshot_changed(stale_snapshot)
+            # Slider and label must stay at the user's target during the
+            # suppression window.
+            self.assertEqual(
+                5000,
+                player_page.slider.value(),
+                "Stale snapshot must not snap slider back to old position",
+            )
+            self.assertEqual(
+                "00:00.500 / 00:01.000",
+                player_page.position_label.text(),
+                "Stale snapshot must not reset label to old position",
+            )
+
+            # Force the suppression window to expire so we can verify the
+            # sync resumes. (300ms wall-clock is too slow for a unit test.)
+            player_page._seek_suppress_until_ns = 0
+
+            # Now a backend snapshot drives the slider normally — even one
+            # that has already overshot the original seek target. This is the
+            # critical "no lock-forever" property: the old guard logic would
+            # have permanently blocked sync once playback advanced past the
+            # pending seek position.
+            overshoot_snapshot = ReplaySnapshot(
+                state="playing",
+                is_started=True,
+                recording_id=recording_id,
+                recording_path=str(self._temp_dir / "recordings" / recording_id),
+                position_ns=700_000_000,  # Past the 500ms seek target.
+                duration_ns=1_000_000_000,
+                speed_multiplier=1.0,
+            )
+            page._on_snapshot_changed(overshoot_snapshot)
+            self.assertEqual(
+                7000,
+                player_page.slider.value(),
+                "Sync must resume after suppression window — no lock-forever",
+            )
+            self.assertEqual(
+                "00:00.700 / 00:01.000",
+                player_page.position_label.text(),
+            )
+        finally:
+            page.close()
+            replay_bridge.shutdown()
+            backend.shutdown()
 
     def _select_recording(self, page: ReplayPage, recording_id: str) -> None:
         recording_list = page._recordings_page.recording_list

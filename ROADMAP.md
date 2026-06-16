@@ -4,7 +4,7 @@
 
 ## 当前位置
 
-`0.3.1` 已正式发布。当前主线进入 `0.3.x` 维护与小步演进阶段。`0.3.x` 仍属于 SDK / driver API 的早期阶段，不承诺兼容 `0.2.x` driver 实现；`0.4.0` 预计会继续收紧 SDK 与插件管理边界。
+`0.3.1` 已正式发布。`0.3.2` 已正式发布。`0.3.x` 仍属于 SDK / driver API 的早期阶段，不承诺兼容 `0.2.x` driver 实现；`0.4.0` 预计会继续收紧 SDK 与插件管理边界。
 
 `0.3.1` 重点修复：
 
@@ -74,6 +74,60 @@
 - replay 时间轴 seek
 - 启动期间 MainWindow 构造的进一步异步化
 
+## 0.3.2
+
+状态：已发布。
+
+`0.3.2` 重点是把 replay 体验补齐到"可以正常用"的程度，并完成导出系统重构。
+
+已完成：
+
+- replay 时间轴任意位置 seek：core 后端新增 `seek` worker，使用 `bisect` 维护时间线索引；UI 用滑块控件触发拖动 / 点击两种 seek 提交方式
+- replay player 页结构整理：原 `timeline.py` 模块的展示函数内联到 player 页，`page.py` 主路径精简
+- preview view 体系新增 `clear()` 钩子，确保 seek 和复位时旧帧数据不会残留在 plot 上
+- 修复滑块 seek 在长录制（>2.147 秒）下静默失败的 bug：`pyqtSignal` 改用 `qint64`，避免 ns 值溢出成负数被后端 clamp 到 0
+- 修复滑块 seek 后 100 ms 轮询 stale snapshot 把滑块视觉拉回原位置的竞态：改用 300 ms 时间窗屏蔽 + 立即更新时间标签
+
+不属于 `0.3.2` 范围：
+
+- session / experiment 列表 UI 与按字段筛选
+- 键盘左右箭头 seek
+- marker / segment 编辑
+
+
+### 导出系统重构
+`0.3.2` 重点是导出系统重构：把原先零散注册的导出器替换成以录制为中心、按需选择内容、自描述的统一导出体验。SDK / driver API 接口保持不变。
+
+`0.3.2` 正式版追加：
+
+- server 入口 `modlink-server` 支持 `--host` / `--port` CLI 参数，替换原先硬编码的默认值
+
+`0.3.2rc1` 已完成：
+
+- 统一 `ExportRequest` dataclass，模式驱动 4 种导出（A 单录制 / B 多录制合并 / C 时间切片 / D 跨录制单流）
+- 14 个 payload-aware formatter，按 signal / raster / field / video 与 annotations / metadata 分发
+- `ExportPackageWriter`：临时目录写入 + 原子 rename，崩溃安全
+- replay backend 导出路径接入真实 bundle 输出，支持关闭时取消 queued / running 导出任务
+- 自描述导出包：`README.md` + `manifest.json` + `streams/` + `annotations/` + `recording_metadata.json`
+- SDK 层 `StreamDescriptor.channel_names` fail-fast 校验，拒绝 CSV-unsafe 名字
+- `RecordingReader` 扩展 4 个范围方法 + 4 个 manifest 属性；新增 `RecordingStore` 用于跨录制扫描
+- 视频导出（MP4 / PNG ZIP）配套 `<stream>.frame_timestamps.csv` sidecar
+- viridis colormap 硬编码 LUT，不引入 matplotlib / colorcet
+- 全局 min-max 归一化采用 lazy + cache
+- widgets UI 通过导出对话框选择录制、stream、格式、标注、元数据和输出目录
+- 删除遗留导出注册表和导出格式下拉，UI 由 `ExportRequest` 驱动
+
+不属于 `0.3.2` 范围：
+
+- `manifest.json` 的 `schema_version` / `checksum` / `lineage` 字段
+- 多时间段切片
+- 并行导出
+- 导出任务历史持久化（重启即清空）
+- UI 4 模式左导航、历史导出列表和打开输出文件夹按钮
+- raw 副本和 zip 打包 UI 选项
+- 跨录制单流导出的专门 UI 入口
+- 用 `ExportEngine` 替换当前 replay backend 导出服务
+
 ## 0.3.x
 
 状态：进行中。
@@ -86,13 +140,13 @@
 - recording catalog 的查询和筛选体验
 - session / experiment 列表、详情和 recording 归档（标签字段已落盘到 recording.json，列表 UI 待补）
 - marker / segment 的展示和编辑
-- replay 时间轴 seek
-- 批量导出和 export 参数配置
+- ~~批量导出和 export 参数配置~~ — 已在 0.3.2 导出重构落地
 - `modlink-plugin` CLI 的状态、来源、升级提示和错误信息
 - 外部插件开发文档和 skill 使用示例
 - 面向 Claude Code / Codex 的独立插件项目示例
 - Qt 6.11 popup 透明边界问题的后续验证，但不把迁移 PySide6 或重写 UI 作为默认方向
 - 启动期间 MainWindow 构造的进一步异步化或预热
+- ~~recording manifest enrichment（录制停止时落盘元数据 + 列表 tooltip）~~ — 已在 0.3.2 实现
 
 仍然保持克制：
 
@@ -163,3 +217,4 @@
 - 梳理 Windows 文件系统相关测试的稳定性
 - 减少重复的临时测试目录和构建产物污染
 - 为正式发布补齐更清晰的 release checklist
+- **长录制存储重构（>4h 录制）**：当前 `frames.csv` 单文件追加 + 每帧一个 `.npz` 的设计在长录制下会全面瓶颈——CSV 文件体积爆炸、单目录文件数过多导致文件系统性能下降、reader 全量加载内存吃紧、进程崩溃丢失整段元数据。需要重新设计分块存储（按时间窗或帧数 rollover 成 chunk 文件）、分段索引、流式读取。可参考 HDF5 / Zarr / TileDB 等科学数据存储的分块策略。0.3.x 不做，0.4.x / 0.5.x 视用户实际长录制需求再定。

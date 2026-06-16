@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import logging
 import queue
 import threading
@@ -25,9 +26,11 @@ from ..storage import (
     resolved_storage_root_dir,
 )
 from .export import ExportService
+from .export_request import ExportMode, ExportRequest, StreamSelection
 from .reader import RecordingReader
 
 ReplayCommand = tuple[Callable[[], None], Future[object]]
+ReplayExportCommand = tuple[ExportRequest | str, str | Path | None]
 
 logger = logging.getLogger(__name__)
 
@@ -150,11 +153,18 @@ class ReplayBackend:
     def stop(self) -> Future[None]:
         return self._submit_command(self._stop_worker)
 
+    def seek(self, position_ns: int) -> Future[None]:
+        return self._submit_command(self._seek_worker, position_ns)
+
     def set_speed(self, multiplier: float) -> Future[float]:
         return self._submit_command(self._set_speed_worker, multiplier)
 
-    def start_export(self, format_id: str) -> Future[ExportJobSnapshot]:
-        return self._submit_command(self._start_export_worker, format_id)
+    def start_export(
+        self,
+        request: ExportRequest | str,
+        output_root_dir: str | Path | None = None,
+    ) -> Future[ExportJobSnapshot]:
+        return self._submit_command(self._start_export_worker, (request, output_root_dir))
 
     def delete_recording(self, recording_id: str) -> Future[tuple[ReplayRecordingSummary, ...]]:
         return self._submit_command(self._delete_recording_worker, recording_id)
@@ -206,6 +216,11 @@ class ReplayBackend:
             label = manifest.get("recording_label")
             session_name = manifest.get("session_name")
             experiment_name = manifest.get("experiment_name")
+            started_at_ns = manifest.get("started_at_ns")
+            duration_ns_raw = manifest.get("duration_ns")
+            status = manifest.get("status")
+            frame_counts = manifest.get("frame_counts_by_stream")
+            total_frames = sum(frame_counts.values()) if isinstance(frame_counts, dict) else None
             summaries.append(
                 ReplayRecordingSummary(
                     recording_id=recording_id,
@@ -216,6 +231,10 @@ class ReplayBackend:
                     stream_ids=stream_ids,
                     session_name=session_name if isinstance(session_name, str) else None,
                     experiment_name=experiment_name if isinstance(experiment_name, str) else None,
+                    started_at_ns=started_at_ns if isinstance(started_at_ns, int) else None,
+                    duration_ns=duration_ns_raw if isinstance(duration_ns_raw, int) else None,
+                    status=status if isinstance(status, str) else None,
+                    total_frames=total_frames,
                 )
             )
         self._recordings = tuple(summaries)
@@ -284,12 +303,62 @@ class ReplayBackend:
         self._speed_multiplier = resolved
         return self._speed_multiplier
 
-    def _start_export_worker(self, format_id: object) -> ExportJobSnapshot:
+    def _seek_worker(self, position_ns: object) -> None:
         reader = self._require_reader()
-        if not isinstance(format_id, str) or format_id.strip() == "":
+        try:
+            target_ns = int(position_ns)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError("REPLAY_INVALID_SEEK_POSITION") from exc
+        target_ns = max(0, min(target_ns, reader.duration_ns))
+
+        # Use bisect to find the correct timeline index for the target position.
+        timeline = reader.frames()
+        timestamps = [ref.relative_timestamp_ns for ref in timeline]
+        self._timeline_index = bisect.bisect_right(timestamps, target_ns)
+        self._position_ns = target_ns
+
+        if self._state == "playing":
+            # Reset wall-clock anchor so playback continues from the new position.
+            self._play_started_wall_ns = time.monotonic_ns()
+            self._play_started_position_ns = target_ns
+        elif self._state == "finished":
+            self._set_state("paused")
+
+    def _start_export_worker(self, request: object) -> ExportJobSnapshot:
+        if not isinstance(request, tuple) or len(request) != 2:
             raise RuntimeError("REPLAY_EXPORT_FORMAT_UNSUPPORTED")
-        export_root_dir = resolved_export_root_dir(self._settings)
-        return self._export_service.enqueue(reader, format_id, export_root_dir)
+        raw_request, output_root_dir = request
+        if isinstance(raw_request, ExportRequest):
+            export_request = raw_request
+        elif isinstance(raw_request, str) and raw_request.strip():
+            reader = self._require_reader()
+            format_id = raw_request.strip()
+            required_payload = format_id.split("_")[0]
+            selections = tuple(
+                StreamSelection(stream_id=stream_id, format_id=format_id)
+                for stream_id, descriptor in reader.descriptors().items()
+                if descriptor.payload_type == required_payload
+            )
+            if not selections:
+                return self._export_service.enqueue_failed(
+                    recording_id=reader.recording_id,
+                    request_summary=format_id,
+                    error=f"no {required_payload!r} streams in recording",
+                )
+            export_request = ExportRequest(
+                mode=ExportMode.SINGLE,
+                recording_ids=(reader.recording_id,),
+                streams=selections,
+            )
+        else:
+            raise RuntimeError("REPLAY_EXPORT_FORMAT_UNSUPPORTED")
+        export_root_dir = (
+            Path(output_root_dir)
+            if isinstance(output_root_dir, str | Path) and str(output_root_dir).strip()
+            else resolved_export_root_dir(self._settings)
+        )
+        storage_root_dir = resolved_storage_root_dir(self._settings)
+        return self._export_service.enqueue(export_request, export_root_dir, storage_root_dir)
 
     def _delete_recording_worker(self, recording_id: object) -> tuple[ReplayRecordingSummary, ...]:
         if not isinstance(recording_id, str) or not recording_id.strip():

@@ -4,12 +4,12 @@
 
 ModLink Studio 的目标不是为每一种设备单独写一个上位机，而是把设备搜索、连接、流描述、实时预览、采集控制和录制保存统一到同一套运行时里。设备接入者主要实现 driver 和 `StreamDescriptor`；宿主、录制链路和大部分展示逻辑复用平台层能力。
 
-当前仓库主线是 `0.3.1`：
+当前仓库主线是 `0.3.2`：
 
 - `modlink_sdk` / `modlink_core` 已切成纯 Python runtime
-- SDK / driver API 仍处于早期阶段，`0.3.1` 不保证兼容 `0.2.x` driver 实现
+- SDK / driver API 仍处于早期阶段，`0.3.2` 不保证兼容 `0.2.x` driver 实现
 - UI 仍处于适配期，但 backend 已经从 Qt 运行时语义中拆开，`0.4.0` 预计会继续收紧 SDK 与插件管理边界
-- `0.3.1` 修复了长时间录制自动停止的 bug，并加入 splash screen、录制删除和 session/experiment 标签字段
+- `0.3.2` 在 `0.3.1` 稳定性修订基础上补齐 replay seek 与录制导出体验
 
 当前版本变更摘要见根目录 [CHANGELOG.md](CHANGELOG.md)，后续版本规划见 [ROADMAP.md](ROADMAP.md)。
 
@@ -28,19 +28,18 @@ ModLink Studio 的目标不是为每一种设备单独写一个上位机，而�
 
 ## Release Status
 
-`0.3.1` 已正式发布：
+`0.3.2` 已正式发布：
 
-- 正式公开发布渠道：**PyPI**
-- `TestPyPI rehearsal` 已完成
+- 当前仓库版本已切到 `0.3.2`
+- 正式公开发布渠道以 **PyPI** 为准
 - `TestPyPI` 只用于发布链路演练，不作为日常安装源
-- 当前仓库版本已切到 `0.3.1`
 
 ## Install
 
-`0.3.1` 可从 PyPI 安装：
+`0.3.2` 可从 PyPI 安装：
 
 ```bash
-python -m pip install modlink-studio==0.3.1
+python -m pip install modlink-studio==0.3.2
 ```
 
 当前安装完成后可用的宿主入口有：
@@ -77,7 +76,7 @@ modlink-plugin uninstall host-camera
 
 ## Plugin Management
 
-`0.3.1` 当前仍沿用以下官方驱动安装入口：
+`0.3.2` 当前仍沿用以下官方驱动安装入口：
 
 - Host Camera
 - Host Microphone
@@ -93,7 +92,7 @@ modlink-plugin uninstall host-camera
 
 ## Driver Development
 
-`0.3.1` 继续以主宿主包 `modlink-studio` 作为公开安装入口。外部 driver 插件通常应该在自己的独立项目里开发，并把 `modlink-studio` 作为依赖；插件代码仍然从 `modlink_sdk` import SDK 类型，因为这个模块随 `modlink-studio` 分发。
+`0.3.2` 继续以主宿主包 `modlink-studio` 作为公开安装入口。外部 driver 插件通常应该在自己的独立项目里开发，并把 `modlink-studio` 作为依赖；插件代码仍然从 `modlink_sdk` import SDK 类型，因为这个模块随 `modlink-studio` 分发。
 
 典型外部插件项目安装方式是：
 

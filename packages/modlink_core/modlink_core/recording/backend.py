@@ -24,6 +24,7 @@ from ..storage import (
     add_recording_segment,
     append_recording_frame,
     create_recording,
+    finalize_recording,
     resolved_storage_root_dir,
 )
 
@@ -316,7 +317,7 @@ class RecordingBackend:
         self._active_recording = None
         self._set_state("idle")
         logger.info("Stopped recording %s", active_recording.recording_id)
-        return RecordingStopSummary(
+        summary = RecordingStopSummary(
             recording_id=active_recording.recording_id,
             recording_path=active_recording.recording_path,
             started_at_ns=active_recording.started_at_ns,
@@ -324,6 +325,20 @@ class RecordingBackend:
             status="completed",
             frame_counts_by_stream=dict(active_recording.frame_counts_by_stream),
         )
+        try:
+            finalize_recording(
+                Path(active_recording.root_dir),
+                active_recording.recording_id,
+                started_at_ns=active_recording.started_at_ns,
+                stopped_at_ns=stopped_at_ns,
+                status="completed",
+                frame_counts_by_stream=dict(active_recording.frame_counts_by_stream),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to finalize recording manifest %s: %s", active_recording.recording_id, exc
+            )
+        return summary
 
     def _add_marker_worker(self, label: object) -> None:
         if self._active_recording is None:
@@ -402,6 +417,21 @@ class RecordingBackend:
         stopped_at_ns = time.time_ns()
         self._active_recording = None
         self._set_state("idle")
+        try:
+            finalize_recording(
+                Path(active_recording.root_dir),
+                active_recording.recording_id,
+                started_at_ns=active_recording.started_at_ns,
+                stopped_at_ns=stopped_at_ns,
+                status="failed",
+                frame_counts_by_stream=dict(active_recording.frame_counts_by_stream),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to finalize failed recording manifest %s: %s",
+                active_recording.recording_id,
+                exc,
+            )
         self._publish_recording_failed(
             active_recording,
             stopped_at_ns=stopped_at_ns,

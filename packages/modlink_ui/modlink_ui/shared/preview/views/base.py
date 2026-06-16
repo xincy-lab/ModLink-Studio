@@ -39,6 +39,11 @@ class BaseStreamView(QWidget):
         self._has_frame = True
         self._dirty = True
 
+    def clear(self) -> None:
+        """Clear all buffered data and reset the view to its initial state."""
+        self._has_frame = False
+        self._dirty = False
+
     @property
     def has_frame(self) -> bool:
         return self._has_frame

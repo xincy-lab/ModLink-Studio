@@ -14,6 +14,7 @@ from modlink_core.models import (
     ReplaySnapshot,
 )
 from modlink_core.replay.backend import ReplayBackend
+from modlink_core.replay.export_request import ExportRequest
 from modlink_core.settings import (
     STORAGE_ROOT_DIR_KEY,
     resolved_export_root_dir,
@@ -121,11 +122,16 @@ class QtReplayBridge(QObject):
     def set_speed(self, multiplier: float) -> None:
         self._watch_command(self._backend.set_speed(multiplier))
 
-    def start_export(self, format_id: str) -> None:
-        self._watch_command(self._backend.start_export(format_id))
+    def start_export(
+        self, request: ExportRequest, output_root_dir: str | Path | None = None
+    ) -> None:
+        self._watch_command(self._backend.start_export(request, output_root_dir))
 
     def delete_recording(self, recording_id: str) -> None:
         self._watch_command(self._backend.delete_recording(recording_id), reset_bus=True)
+
+    def seek(self, position_ns: int) -> None:
+        self._watch_command(self._backend.seek(position_ns))
 
     def shutdown(self) -> None:
         if self._is_shutdown:

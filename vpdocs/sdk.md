@@ -7,7 +7,7 @@
 - 外部 driver 项目依赖公开主包 `modlink-studio`，代码从随主包分发的 `modlink_sdk` 导入 SDK 契约
 - 安装后通过 `modlink.drivers` entry point 被宿主发现
 
-当前文档以 `0.3.1` 主线为准。SDK / driver API 仍处于早期阶段，`0.3.1` 不保证兼容 `0.2.x` driver 实现；外部插件建议明确依赖兼容的 `modlink-studio` 版本。`0.4.0` 预计会继续收紧 SDK 与插件管理边界。
+当前文档以 `0.3.2` 主线为准。SDK / driver API 仍处于早期阶段，`0.3.2` 不保证兼容 `0.2.x` driver 实现；外部插件建议明确依赖兼容的 `modlink-studio` 版本。`0.4.0` 预计会继续收紧 SDK 与插件管理边界。
 
 需要特别说明的是：公开 PyPI 发布面当前收口为 `modlink-studio` 一个主包；`modlink_sdk` 这一层契约由主包携带，不要求外部插件项目单独依赖一个公开的 `modlink-sdk` 包。
 
@@ -281,7 +281,7 @@ my_driver/
 name = "my-driver"
 version = "0.1.0"
 dependencies = [
-  "modlink-studio>=0.3.1",
+  "modlink-studio>=0.3.2",
   "numpy>=2.3.3",
 ]
 
@@ -404,4 +404,4 @@ name.XX
 - `host-microphone`
 - `openbci-ganglion`
 
-在 `0.3.1` 当前阶段，这些 entry point 主要通过 `modlink-plugin install <plugin_id>` 安装进当前环境；后续会沿这条路径继续扩展到更通用的插件管理方式。
+在 `0.3.2` 当前阶段，这些 entry point 主要通过 `modlink-plugin install <plugin_id>` 安装进当前环境；后续会沿这条路径继续扩展到更通用的插件管理方式。

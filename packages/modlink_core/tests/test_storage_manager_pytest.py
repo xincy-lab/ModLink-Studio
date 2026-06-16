@@ -12,6 +12,7 @@ from modlink_core.storage import (
     append_recording_frame,
     create_recording,
     delete_recording,
+    finalize_recording,
     list_recordings,
 )
 
@@ -201,3 +202,148 @@ def test_delete_recording_raises_when_id_does_not_exist(tmp_path) -> None:
 
     with pytest.raises(FileNotFoundError):
         delete_recording(tmp_path, "rec_nonexistent")
+
+
+def test_finalize_recording_writes_all_fields(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="test_finalize",
+    )
+
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=2_000_000_000,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 42},
+    )
+
+    manifest = json.loads(
+        (tmp_path / "recordings" / recording_id / "recording.json").read_text(encoding="utf-8")
+    )
+    assert manifest["started_at_ns"] == 1_000_000_000
+    assert manifest["stopped_at_ns"] == 2_000_000_000
+    assert manifest["duration_ns"] == 1_000_000_000
+    assert manifest["status"] == "completed"
+    assert manifest["frame_counts_by_stream"] == {descriptor.stream_id: 42}
+
+
+def test_finalize_recording_preserves_existing_fields(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="preserve_test",
+        session_name="session_xyz",
+        experiment_name="exp_abc",
+    )
+
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=100,
+        stopped_at_ns=200,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 10},
+    )
+
+    manifest = json.loads(
+        (tmp_path / "recordings" / recording_id / "recording.json").read_text(encoding="utf-8")
+    )
+    assert manifest["recording_id"] == recording_id
+    assert manifest["recording_label"] == "preserve_test"
+    assert manifest["session_name"] == "session_xyz"
+    assert manifest["experiment_name"] == "exp_abc"
+    assert manifest["stream_ids"] == [descriptor.stream_id]
+
+
+def test_finalize_recording_failed_status(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="failed_test",
+    )
+
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=500,
+        stopped_at_ns=1500,
+        status="failed",
+        frame_counts_by_stream={descriptor.stream_id: 5},
+    )
+
+    manifest = json.loads(
+        (tmp_path / "recordings" / recording_id / "recording.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["duration_ns"] == 1000
+
+
+def test_recording_stop_finalize_manifest(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="stop_finalize_test",
+    )
+
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=61_000_000_000,
+        status="completed",
+        frame_counts_by_stream={"s1": 50},
+    )
+
+    manifest = json.loads(
+        (tmp_path / "recordings" / recording_id / "recording.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "completed"
+    assert manifest["frame_counts_by_stream"] == {"s1": 50}
+    assert manifest["duration_ns"] == 60_000_000_000
+
+
+def test_recording_fail_finalize_manifest(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="fail_finalize_test",
+    )
+
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=31_000_000_000,
+        status="failed",
+        frame_counts_by_stream={"s1": 10},
+    )
+
+    manifest = json.loads(
+        (tmp_path / "recordings" / recording_id / "recording.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["frame_counts_by_stream"] == {"s1": 10}
+    assert manifest["duration_ns"] == 30_000_000_000

@@ -8,7 +8,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from modlink_server.app import create_app
+from modlink_server.app import create_app, main
 from modlink_server.routes import _iter_sse_messages
 
 from modlink_core import EventStreamOverflowError, SettingsStore
@@ -299,6 +299,15 @@ def test_websocket_frames_stream_encodes_signal_frame(settings_path: Path) -> No
     assert payload["dtype"] == "float32"
     assert payload["shape"] == [1, 4]
     assert "extra" not in payload
+
+
+def test_server_cli_help_exits_without_starting_server(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exc_info, patch("modlink_server.app.uvicorn.run") as run:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "Run the ModLink Studio HTTP server." in capsys.readouterr().out
+    run.assert_not_called()
 
 
 def _read_sse_event(lines) -> tuple[str, dict[str, object]]:

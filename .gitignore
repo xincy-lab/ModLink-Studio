@@ -40,6 +40,7 @@ Thumbs.db
 .history/
 .vscode/
 .qwen/
+.omo/
 
 # Local external repos / experiments
 ModLink-Studio-Plugins/

@@ -73,6 +73,25 @@ class FrameEnvelope:
         self.stream_id = make_stream_id(self.device_id, self.stream_key)
 
 
+def _validate_channel_names(names: tuple[str, ...]) -> None:
+    """Reject channel names that are not CSV-safe at construction time."""
+    for name in names:
+        if name == "":
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains empty string")
+        if name != name.lstrip():
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains leading whitespace")
+        if name != name.rstrip():
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains trailing whitespace")
+        if "," in name:
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains ','")
+        if "\n" in name:
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains '\\n'")
+        if "\r" in name:
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains '\\r'")
+        if "\0" in name:
+            raise ValueError(f"channel_name {name!r} is not CSV-safe: contains '\\0'")
+
+
 @dataclass(slots=True)
 class StreamDescriptor:
     """Static metadata describing one stream exposed by a driver.
@@ -113,3 +132,4 @@ class StreamDescriptor:
         self.stream_key = normalize_stream_key(self.stream_key)
         self.stream_id = make_stream_id(self.device_id, self.stream_key)
         self.metadata = dict(self.metadata)
+        _validate_channel_names(self.channel_names)

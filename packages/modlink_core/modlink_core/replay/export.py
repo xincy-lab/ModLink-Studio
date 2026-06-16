@@ -1,40 +1,30 @@
 from __future__ import annotations
 
-import csv
-import io
+import logging
 import queue
 import threading
-import zipfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-import numpy as np
-
 from ..models import ExportJobSnapshot
-from ..storage._internal.files import write_json
-from .reader import RecordingReader
+from .export_modes.cross import export_cross_recording_stream
+from .export_modes.multi import export_multi_recording
+from .export_modes.single import export_single_recording
+from .export_modes.time_slice import export_time_slice
+from .export_request import ExportMode, ExportRequest
+from .store import RecordingStore
 
-SUPPORTED_EXPORT_FORMATS = (
-    "signal_csv",
-    "signal_npz",
-    "raster_npz",
-    "field_npz",
-    "video_frames_zip",
-    "recording_bundle_zip",
-)
-
-ExportProgress = Callable[[float], None]
-Exporter = Callable[[RecordingReader, Path, ExportProgress], None]
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
 class _ExportRequest:
     job_id: str
-    reader: RecordingReader
-    format_id: str
-    output_dir: Path
+    request: ExportRequest
+    request_summary: str
+    output_root_dir: Path
+    storage_root_dir: Path
 
 
 class ExportService:
@@ -45,11 +35,13 @@ class ExportService:
         self._queue: queue.Queue[_ExportRequest | object] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._shutdown_sentinel = object()
+        self._shutdown_requested = threading.Event()
         self._started = False
 
     def start(self) -> None:
         if self._started:
             return
+        self._shutdown_requested.clear()
         self._thread = threading.Thread(
             target=self._run,
             name="modlink.replay.export",
@@ -61,12 +53,15 @@ class ExportService:
     def shutdown(self, *, timeout_ms: int = 3000) -> None:
         if not self._started:
             return
+        self._shutdown_requested.set()
+        self._cancel_pending_jobs()
         self._queue.put(self._shutdown_sentinel)
         thread = self._thread
         if thread is not None:
             thread.join(max(0, timeout_ms) / 1000)
             if thread.is_alive():
-                raise TimeoutError(f"replay export shutdown timed out after {timeout_ms}ms")
+                logger.warning("Replay export shutdown is still waiting on an active export")
+                return
         self._thread = None
         self._started = False
 
@@ -76,23 +71,20 @@ class ExportService:
 
     def enqueue(
         self,
-        reader: RecordingReader,
-        format_id: str,
+        request: ExportRequest,
         output_root_dir: Path,
+        storage_root_dir: Path,
     ) -> ExportJobSnapshot:
-        if format_id not in SUPPORTED_EXPORT_FORMATS:
-            raise RuntimeError(f"REPLAY_EXPORT_FORMAT_UNSUPPORTED: {format_id}")
-
         job_id = uuid4().hex
-        output_dir = Path(output_root_dir) / reader.recording_id / job_id
+        request_summary = _summarize_request(request)
         snapshot = ExportJobSnapshot(
             job_id=job_id,
-            recording_id=reader.recording_id,
-            format_id=format_id,
+            recording_id=request.recording_ids[0],
             state="queued",
             progress=0.0,
             output_path=None,
             error=None,
+            request_summary=request_summary,
         )
         with self._lock:
             self._jobs[job_id] = snapshot
@@ -100,19 +92,51 @@ class ExportService:
         self._queue.put(
             _ExportRequest(
                 job_id=job_id,
-                reader=reader,
-                format_id=format_id,
-                output_dir=output_dir,
+                request=request,
+                request_summary=request_summary,
+                output_root_dir=Path(output_root_dir),
+                storage_root_dir=Path(storage_root_dir),
             )
         )
         return snapshot
 
+    def enqueue_failed(
+        self,
+        *,
+        recording_id: str,
+        request_summary: str,
+        error: str,
+    ) -> ExportJobSnapshot:
+        job_id = uuid4().hex
+        snapshot = ExportJobSnapshot(
+            job_id=job_id,
+            recording_id=recording_id,
+            state="failed",
+            progress=1.0,
+            output_path=None,
+            error=error,
+            request_summary=request_summary,
+        )
+        with self._lock:
+            self._jobs[job_id] = snapshot
+            self._job_order.append(job_id)
+        return snapshot
+
     def _run(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is self._shutdown_sentinel:
-                return
-            self._process_request(item)
+        try:
+            while True:
+                item = self._queue.get()
+                if item is self._shutdown_sentinel:
+                    return
+                if not isinstance(item, _ExportRequest):
+                    continue
+                if self._shutdown_requested.is_set():
+                    self._cancel_job(item.job_id)
+                    continue
+                self._process_request(item)
+        finally:
+            self._thread = None
+            self._started = False
 
     def _process_request(self, request: _ExportRequest) -> None:
         self._update_job(
@@ -124,13 +148,10 @@ class ExportService:
         )
 
         try:
-            request.output_dir.mkdir(parents=True, exist_ok=False)
-            exporter = _EXPORTERS[request.format_id]
-            exporter(
-                request.reader,
-                request.output_dir,
-                lambda value: self._update_progress(request.job_id, value),
-            )
+            output_path = self._run_export(request)
+        except InterruptedError:
+            self._cancel_job(request.job_id)
+            return
         except Exception as exc:
             self._update_job(
                 request.job_id,
@@ -145,7 +166,75 @@ class ExportService:
             request.job_id,
             state="completed",
             progress=1.0,
-            output_path=str(request.output_dir),
+            output_path=str(output_path),
+            error=None,
+        )
+
+    def _run_export(self, request: _ExportRequest) -> Path:
+        store = RecordingStore(request.storage_root_dir)
+        export_request = request.request
+
+        def progress_fn(_stream_id: str) -> None:
+            self._raise_if_shutdown_requested()
+            self._update_progress(request.job_id, 0.5)
+            self._raise_if_shutdown_requested()
+
+        if export_request.mode == ExportMode.SINGLE:
+            reader = store.open(export_request.recording_ids[0])
+            return export_single_recording(
+                export_request,
+                reader,
+                request.output_root_dir,
+                progress_fn,
+            )
+        if export_request.mode == ExportMode.TIMESLICE:
+            reader = store.open(export_request.recording_ids[0])
+            return export_time_slice(
+                export_request,
+                reader,
+                request.output_root_dir,
+                progress_fn,
+            )
+        if export_request.mode == ExportMode.MULTI:
+            return export_multi_recording(
+                export_request,
+                store,
+                request.output_root_dir,
+                progress_fn,
+            )
+        if export_request.mode == ExportMode.CROSS_STREAM:
+            return export_cross_recording_stream(
+                export_request,
+                store,
+                request.output_root_dir,
+                progress_fn,
+            )
+        raise ValueError(f"unknown export mode {export_request.mode!r}")
+
+    def _raise_if_shutdown_requested(self) -> None:
+        if self._shutdown_requested.is_set():
+            raise InterruptedError("Export cancelled during shutdown")
+
+    def _cancel_pending_jobs(self) -> None:
+        pending_items: list[_ExportRequest] = []
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is self._shutdown_sentinel:
+                continue
+            if isinstance(item, _ExportRequest):
+                pending_items.append(item)
+        for item in pending_items:
+            self._cancel_job(item.job_id)
+
+    def _cancel_job(self, job_id: str) -> None:
+        self._update_job(
+            job_id,
+            state="cancelled",
+            progress=1.0,
+            output_path=None,
             error=None,
         )
 
@@ -155,11 +244,11 @@ class ExportService:
             self._jobs[job_id] = ExportJobSnapshot(
                 job_id=snapshot.job_id,
                 recording_id=snapshot.recording_id,
-                format_id=snapshot.format_id,
                 state=snapshot.state,
                 progress=min(1.0, max(0.0, float(value))),
                 output_path=snapshot.output_path,
                 error=snapshot.error,
+                request_summary=snapshot.request_summary,
             )
 
     def _update_job(
@@ -176,219 +265,15 @@ class ExportService:
             self._jobs[job_id] = ExportJobSnapshot(
                 job_id=snapshot.job_id,
                 recording_id=snapshot.recording_id,
-                format_id=snapshot.format_id,
                 state=state,
                 progress=min(1.0, max(0.0, float(progress))),
                 output_path=output_path,
                 error=error,
+                request_summary=snapshot.request_summary,
             )
 
 
-def _export_signal_csv(
-    reader: RecordingReader, output_dir: Path, update_progress: ExportProgress
-) -> None:
-    signal_streams = _streams_by_type(reader, "signal")
-    if not signal_streams:
-        raise RuntimeError("recording does not contain signal streams")
-
-    total_frames = sum(len(reader.frames_for_stream(stream_id)) for stream_id in signal_streams)
-    processed_frames = 0
-    for stream_id in signal_streams:
-        descriptor = reader.descriptor(stream_id)
-        if descriptor is None:
-            continue
-        frame_refs = reader.frames_for_stream(stream_id)
-        output_path = output_dir / f"{_export_name(reader, stream_id)}.csv"
-        channel_names = list(descriptor.channel_names) or [
-            f"ch{index}" for index in range(_channel_count(reader, frame_refs))
-        ]
-        with output_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["chunk_timestamp_ns", "seq", "sample_offset", *channel_names])
-            for ref in frame_refs:
-                data = reader.load_frame(ref).data
-                normalized = _normalize_signal_frame(data)
-                for sample_offset in range(normalized.shape[1]):
-                    writer.writerow(
-                        [
-                            ref.timestamp_ns,
-                            "" if ref.seq is None else ref.seq,
-                            sample_offset,
-                            *normalized[:, sample_offset].tolist(),
-                        ]
-                    )
-                processed_frames += 1
-                update_progress(processed_frames / max(1, total_frames))
-
-
-def _export_signal_npz(
-    reader: RecordingReader, output_dir: Path, update_progress: ExportProgress
-) -> None:
-    signal_streams = _streams_by_type(reader, "signal")
-    if not signal_streams:
-        raise RuntimeError("recording does not contain signal streams")
-
-    for index, stream_id in enumerate(signal_streams, start=1):
-        descriptor = reader.descriptor(stream_id)
-        frame_refs = reader.frames_for_stream(stream_id)
-        data = np.stack(
-            [_normalize_signal_frame(reader.load_frame(ref).data) for ref in frame_refs]
-        )
-        timestamps_ns = np.asarray([ref.timestamp_ns for ref in frame_refs], dtype=np.int64)
-        seq = np.asarray(
-            [(-1 if ref.seq is None else ref.seq) for ref in frame_refs], dtype=np.int64
-        )
-        export_name = _export_name(reader, stream_id)
-        np.savez_compressed(
-            output_dir / f"{export_name}.npz",
-            data=data,
-            timestamps_ns=timestamps_ns,
-            seq=seq,
-        )
-        write_json(
-            output_dir / f"{export_name}.json",
-            {
-                "stream_id": stream_id,
-                "payload_type": descriptor.payload_type if descriptor is not None else "signal",
-                "channel_names": [] if descriptor is None else list(descriptor.channel_names),
-            },
-        )
-        update_progress(index / max(1, len(signal_streams)))
-
-
-def _export_raster_npz(
-    reader: RecordingReader, output_dir: Path, update_progress: ExportProgress
-) -> None:
-    _export_stacked_npz(reader, output_dir, update_progress, payload_type="raster")
-
-
-def _export_field_npz(
-    reader: RecordingReader, output_dir: Path, update_progress: ExportProgress
-) -> None:
-    _export_stacked_npz(reader, output_dir, update_progress, payload_type="field")
-
-
-def _export_video_frames_zip(
-    reader: RecordingReader, output_dir: Path, update_progress: ExportProgress
-) -> None:
-    video_streams = _streams_by_type(reader, "video")
-    if not video_streams:
-        raise RuntimeError("recording does not contain video streams")
-
-    for index, stream_id in enumerate(video_streams, start=1):
-        zip_path = output_dir / f"{_export_name(reader, stream_id)}.zip"
-        frame_refs = reader.frames_for_stream(stream_id)
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            index_buffer = io.StringIO()
-            writer = csv.writer(index_buffer)
-            writer.writerow(["frame_index", "timestamp_ns", "seq", "file_name"])
-            for ref in frame_refs:
-                file_name = f"{ref.frame_index:06d}.npy"
-                writer.writerow(
-                    [
-                        ref.frame_index,
-                        ref.timestamp_ns,
-                        "" if ref.seq is None else ref.seq,
-                        file_name,
-                    ]
-                )
-                frame_buffer = io.BytesIO()
-                np.save(frame_buffer, reader.load_frame(ref).data)
-                archive.writestr(file_name, frame_buffer.getvalue())
-            archive.writestr("index.csv", index_buffer.getvalue())
-        update_progress(index / max(1, len(video_streams)))
-
-
-def _export_recording_bundle_zip(
-    reader: RecordingReader,
-    output_dir: Path,
-    update_progress: ExportProgress,
-) -> None:
-    zip_path = output_dir / f"{reader.recording_id}.zip"
-    paths = [path for path in sorted(reader.recording_path.rglob("*")) if path.is_file()]
-    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for index, path in enumerate(paths, start=1):
-            archive.write(path, path.relative_to(reader.recording_path.parent.parent))
-            update_progress(index / max(1, len(paths)))
-
-
-def _export_stacked_npz(
-    reader: RecordingReader,
-    output_dir: Path,
-    update_progress: ExportProgress,
-    *,
-    payload_type: str,
-) -> None:
-    stream_ids = _streams_by_type(reader, payload_type)
-    if not stream_ids:
-        raise RuntimeError(f"recording does not contain {payload_type} streams")
-
-    for index, stream_id in enumerate(stream_ids, start=1):
-        descriptor = reader.descriptor(stream_id)
-        frame_refs = reader.frames_for_stream(stream_id)
-        arrays = [reader.load_frame(ref).data for ref in frame_refs]
-        if not arrays:
-            raise RuntimeError(f"stream '{stream_id}' does not contain any frames")
-        shape = arrays[0].shape
-        if any(array.shape != shape for array in arrays[1:]):
-            raise RuntimeError(f"stream '{stream_id}' has inconsistent frame shapes")
-        export_name = _export_name(reader, stream_id)
-        np.savez_compressed(
-            output_dir / f"{export_name}.npz",
-            data=np.stack(arrays),
-            timestamps_ns=np.asarray([ref.timestamp_ns for ref in frame_refs], dtype=np.int64),
-            seq=np.asarray(
-                [(-1 if ref.seq is None else ref.seq) for ref in frame_refs], dtype=np.int64
-            ),
-        )
-        write_json(
-            output_dir / f"{export_name}.json",
-            {
-                "stream_id": stream_id,
-                "payload_type": payload_type,
-                "channel_names": [] if descriptor is None else list(descriptor.channel_names),
-            },
-        )
-        update_progress(index / max(1, len(stream_ids)))
-
-
-def _streams_by_type(reader: RecordingReader, payload_type: str) -> list[str]:
-    stream_ids: list[str] = []
-    for stream_id, descriptor in reader.descriptors().items():
-        if descriptor.payload_type == payload_type:
-            stream_ids.append(stream_id)
-    return stream_ids
-
-
-def _normalize_signal_frame(data: np.ndarray) -> np.ndarray:
-    array = np.asarray(data)
-    if array.ndim == 1:
-        return array.reshape(1, array.shape[0])
-    if array.ndim != 2:
-        raise RuntimeError(f"signal export expects 1D or 2D frames, got shape {array.shape!r}")
-    return array
-
-
-def _channel_count(reader: RecordingReader, frame_refs: tuple[object, ...]) -> int:
-    if not frame_refs:
-        return 0
-    first_frame = reader.load_frame(frame_refs[0]).data  # type: ignore[arg-type]
-    return _normalize_signal_frame(first_frame).shape[0]
-
-
-def _export_name(reader: RecordingReader, stream_id: str) -> str:
-    descriptor = reader.descriptor(stream_id)
-    base = stream_id if descriptor is None else descriptor.stream_key
-    cleaned = "".join(char if char.isalnum() or char in {"-", "_"} else "_" for char in base)
-    cleaned = cleaned.strip("_")
-    return cleaned or "stream"
-
-
-_EXPORTERS: dict[str, Exporter] = {
-    "signal_csv": _export_signal_csv,
-    "signal_npz": _export_signal_npz,
-    "raster_npz": _export_raster_npz,
-    "field_npz": _export_field_npz,
-    "video_frames_zip": _export_video_frames_zip,
-    "recording_bundle_zip": _export_recording_bundle_zip,
-}
+def _summarize_request(request: ExportRequest) -> str:
+    streams = ", ".join(f"{item.stream_id}:{item.format_id}" for item in request.streams)
+    recordings = ", ".join(request.recording_ids)
+    return f"{request.mode.value} | {recordings} | {streams}"

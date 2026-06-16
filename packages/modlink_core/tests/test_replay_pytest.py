@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import queue
+import threading
 import time
-import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -10,8 +10,14 @@ import pytest
 
 from modlink_core.bus import StreamBus
 from modlink_core.event_stream import BackendEventBroker
-from modlink_core.models import ExportJobSnapshot, ReplayMarker, ReplaySegment
+from modlink_core.models import (
+    ExportJobSnapshot,
+    ReplayMarker,
+    ReplayRecordingSummary,
+    ReplaySegment,
+)
 from modlink_core.replay import ReplayBackend
+from modlink_core.replay.export_request import ExportMode, ExportRequest, StreamSelection
 from modlink_core.replay.reader import RecordingReader
 from modlink_core.settings import SettingsStore, declare_core_settings
 from modlink_core.storage import (
@@ -19,6 +25,7 @@ from modlink_core.storage import (
     add_recording_segment,
     append_recording_frame,
     create_recording,
+    finalize_recording,
     list_recordings,
     load_recording_frame_data,
     read_recording,
@@ -211,67 +218,34 @@ def test_replay_backend_replays_on_its_own_bus(
         backend.shutdown()
 
 
-@pytest.mark.parametrize(
-    ("format_id", "expected_files"),
-    [
-        ("signal_csv", ("signal.csv",)),
-        ("signal_npz", ("signal.npz", "signal.json")),
-        ("raster_npz", ("raster.npz", "raster.json")),
-        ("field_npz", ("field.npz", "field.json")),
-        ("video_frames_zip", ("video.zip",)),
-        ("recording_bundle_zip", ("rec_demo.zip",)),
-    ],
-)
-def test_replay_export_formats_write_expected_outputs(
+def test_replay_backend_play_after_seek_starts_from_seeked_position(
     tmp_path,
     descriptor_factory,
     frame_factory,
-    format_id: str,
-    expected_files: tuple[str, ...],
 ) -> None:
-    descriptors = {
-        "signal": descriptor_factory(
-            payload_type="signal", stream_key="signal", chunk_size=2, channel_names=("c3", "c4")
-        ),
-        "raster": descriptor_factory(payload_type="raster", stream_key="raster", chunk_size=1),
-        "field": descriptor_factory(payload_type="field", stream_key="field", chunk_size=1),
-        "video": descriptor_factory(payload_type="video", stream_key="video", chunk_size=1),
-    }
-    recording_id = create_recording(
-        tmp_path,
-        {descriptor.stream_id: descriptor for descriptor in descriptors.values()},
-        recording_id="rec_demo",
-    )
+    """After seeking to a position, play should emit only frames after that position."""
+    descriptor = descriptor_factory(payload_type="signal", stream_key="signal", chunk_size=2)
+    recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+    # Frame 1 at t=0ms (relative)
     append_recording_frame(
         tmp_path,
         recording_id,
-        frame_factory(descriptors["signal"], timestamp_ns=1_000_000_000, seq=1),
+        frame_factory(descriptor, timestamp_ns=1_000_000_000, seq=1),
         frame_index=1,
     )
+    # Frame 2 at t=50ms (relative)
     append_recording_frame(
         tmp_path,
         recording_id,
-        frame_factory(descriptors["raster"], timestamp_ns=1_000_000_100, seq=2, line_length=4),
-        frame_index=1,
+        frame_factory(descriptor, timestamp_ns=1_050_000_000, seq=2),
+        frame_index=2,
     )
+    # Frame 3 at t=100ms (relative)
     append_recording_frame(
         tmp_path,
         recording_id,
-        frame_factory(descriptors["field"], timestamp_ns=1_000_000_200, seq=3, height=3, width=4),
-        frame_index=1,
-    )
-    append_recording_frame(
-        tmp_path,
-        recording_id,
-        frame_factory(
-            descriptors["video"],
-            timestamp_ns=1_000_000_300,
-            seq=4,
-            height=2,
-            width=3,
-            dtype=np.uint8,
-        ),
-        frame_index=1,
+        frame_factory(descriptor, timestamp_ns=1_100_000_000, seq=3),
+        frame_index=3,
     )
 
     settings = _build_settings(tmp_path)
@@ -279,18 +253,79 @@ def test_replay_export_formats_write_expected_outputs(
     backend.start()
 
     try:
+        backend.refresh_recordings().result(1.0)
         backend.open_recording(tmp_path / "recordings" / recording_id).result(1.0)
-        job = backend.start_export(format_id).result(1.0)
-        completed = _wait_for_job(backend, job.job_id, timeout=2.0)
-        assert completed.state == "completed"
-        assert completed.output_path is not None
-        output_dir = Path(completed.output_path)
-        assert output_dir.is_dir()
-        for file_name in expected_files:
-            assert (output_dir / file_name).exists()
-        if format_id == "recording_bundle_zip":
-            with zipfile.ZipFile(output_dir / "rec_demo.zip") as archive:
-                assert "recordings/rec_demo/recording.json" in archive.namelist()
+        replay_stream = backend.bus.open_frame_stream(maxsize=8, consumer_name="replay-test")
+
+        # Seek to 60ms — past frame 1 (0ms) and frame 2 (50ms), before frame 3 (100ms)
+        backend.seek(60_000_000).result(1.0)
+        snapshot = backend.snapshot()
+        assert snapshot.position_ns == 60_000_000
+        assert snapshot.state == "ready"
+
+        # Now play — should only emit frame 3 (at 100ms), not frames 1 and 2
+        backend.play().result(1.0)
+        _wait_until(lambda: backend.snapshot().state == "finished", timeout=2.0)
+
+        received = _read_frames(replay_stream, expected_count=1, timeout=1.0)
+        assert [frame.seq for frame in received] == [3]
+    finally:
+        backend.shutdown()
+
+
+def test_replay_backend_play_after_seek_from_finished_starts_from_seeked_position(
+    tmp_path,
+    descriptor_factory,
+    frame_factory,
+) -> None:
+    """After finishing playback, seeking, then playing again should start from seeked position."""
+    descriptor = descriptor_factory(payload_type="signal", stream_key="signal", chunk_size=2)
+    recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_000_000_000, seq=1),
+        frame_index=1,
+    )
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_050_000_000, seq=2),
+        frame_index=2,
+    )
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_100_000_000, seq=3),
+        frame_index=3,
+    )
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+
+    try:
+        backend.refresh_recordings().result(1.0)
+        backend.open_recording(tmp_path / "recordings" / recording_id).result(1.0)
+        replay_stream = backend.bus.open_frame_stream(maxsize=16, consumer_name="replay-test")
+
+        # Play to completion
+        backend.play().result(1.0)
+        _wait_until(lambda: backend.snapshot().state == "finished", timeout=2.0)
+        # Drain all frames from first playback
+        _read_frames(replay_stream, expected_count=3, timeout=1.0)
+
+        # Seek to 60ms (past frame 1 and 2, before frame 3)
+        backend.seek(60_000_000).result(1.0)
+        snapshot = backend.snapshot()
+        assert snapshot.state == "paused"
+        assert snapshot.position_ns == 60_000_000
+
+        # Play again — should only emit frame 3
+        backend.play().result(1.0)
+        _wait_until(lambda: backend.snapshot().state == "finished", timeout=2.0)
+        received = _read_frames(replay_stream, expected_count=1, timeout=1.0)
+        assert [frame.seq for frame in received] == [3]
     finally:
         backend.shutdown()
 
@@ -321,6 +356,250 @@ def test_replay_export_job_fails_when_format_has_no_matching_streams(
         assert failed.error is not None
     finally:
         backend.shutdown()
+
+
+def test_replay_backend_export_request_writes_single_bundle(
+    tmp_path,
+    descriptor_factory,
+    frame_factory,
+) -> None:
+    descriptor = descriptor_factory(
+        payload_type="signal",
+        stream_key="signal",
+        chunk_size=2,
+        channel_names=("ch0", "ch1"),
+    )
+    recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_000_000_000, seq=1),
+        frame_index=1,
+    )
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=1_100_000_000,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 1},
+    )
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+
+    try:
+        request = ExportRequest(
+            mode=ExportMode.SINGLE,
+            recording_ids=(recording_id,),
+            streams=(StreamSelection(stream_id=descriptor.stream_id, format_id="signal_csv"),),
+        )
+        job = backend.start_export(request).result(1.0)
+        completed = _wait_for_job(backend, job.job_id, timeout=2.0)
+    finally:
+        backend.shutdown()
+
+    assert completed.state == "completed"
+    assert completed.output_path is not None
+    output_path = Path(completed.output_path)
+    assert (output_path / "manifest.json").is_file()
+    assert (output_path / "README.md").is_file()
+    assert (output_path / "streams" / "signal.csv").is_file()
+
+
+def test_replay_backend_export_request_writes_multi_bundle_without_open_reader(
+    tmp_path,
+    descriptor_factory,
+    frame_factory,
+) -> None:
+    descriptor = descriptor_factory(
+        payload_type="signal",
+        stream_key="signal",
+        chunk_size=2,
+        channel_names=("ch0", "ch1"),
+    )
+    recording_ids: list[str] = []
+    for index in range(2):
+        recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+        append_recording_frame(
+            tmp_path,
+            recording_id,
+            frame_factory(descriptor, timestamp_ns=1_000_000_000 + index, seq=index),
+            frame_index=1,
+        )
+        finalize_recording(
+            tmp_path,
+            recording_id,
+            started_at_ns=1_000_000_000 + index,
+            stopped_at_ns=1_100_000_000 + index,
+            status="completed",
+            frame_counts_by_stream={descriptor.stream_id: 1},
+        )
+        recording_ids.append(recording_id)
+
+    output_root = tmp_path / "chosen_exports"
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+
+    try:
+        request = ExportRequest(
+            mode=ExportMode.MULTI,
+            recording_ids=tuple(recording_ids),
+            streams=(StreamSelection(stream_id=descriptor.stream_id, format_id="signal_csv"),),
+        )
+        job = backend.start_export(request, output_root).result(1.0)
+        completed = _wait_for_job(backend, job.job_id, timeout=2.0)
+    finally:
+        backend.shutdown()
+
+    assert completed.state == "completed"
+    assert completed.output_path is not None
+    output_path = Path(completed.output_path)
+    assert output_path.is_relative_to(output_root)
+    for recording_id in recording_ids:
+        assert (output_path / "recordings" / recording_id / "streams" / "signal.csv").is_file()
+
+
+def test_replay_export_shutdown_cancels_running_job_and_cleans_tmp(
+    tmp_path,
+    descriptor_factory,
+    frame_factory,
+    monkeypatch,
+) -> None:
+    descriptor = descriptor_factory(
+        payload_type="signal",
+        stream_key="signal",
+        chunk_size=2,
+        channel_names=("ch0", "ch1"),
+    )
+    recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_000_000_000, seq=1),
+        frame_index=1,
+    )
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=1_100_000_000,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 1},
+    )
+
+    export_started = threading.Event()
+    allow_progress = threading.Event()
+    output_root = tmp_path / "exports"
+
+    def blocking_export(request, reader, output_root_dir, progress_fn):
+        from modlink_core.replay.package_writer import ExportPackageWriter
+
+        with ExportPackageWriter(Path(output_root_dir) / "blocking_bundle") as pkg:
+            (pkg.root / "partial.txt").write_text("partial", encoding="utf-8")
+            export_started.set()
+            allow_progress.wait(1.0)
+            progress_fn(request.streams[0].stream_id)
+        raise AssertionError("cancelled export should not complete")
+
+    monkeypatch.setattr(
+        "modlink_core.replay.export.export_single_recording",
+        blocking_export,
+    )
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+
+    request = ExportRequest(
+        mode=ExportMode.SINGLE,
+        recording_ids=(recording_id,),
+        streams=(StreamSelection(stream_id=descriptor.stream_id, format_id="signal_csv"),),
+    )
+    job = backend.start_export(request, output_root).result(1.0)
+    assert export_started.wait(1.0)
+
+    backend.shutdown(timeout_ms=50)
+    allow_progress.set()
+    cancelled = _wait_for_job(backend, job.job_id, timeout=2.0)
+    backend.shutdown(timeout_ms=1000)
+
+    assert cancelled.state == "cancelled"
+    assert cancelled.output_path is None
+    assert cancelled.error is None
+    assert not (output_root / "blocking_bundle").exists()
+    assert list(output_root.glob(".tmp_*")) == []
+
+
+def test_replay_export_shutdown_cancels_queued_jobs(
+    tmp_path,
+    descriptor_factory,
+    frame_factory,
+    monkeypatch,
+) -> None:
+    descriptor = descriptor_factory(
+        payload_type="signal",
+        stream_key="signal",
+        chunk_size=2,
+        channel_names=("ch0", "ch1"),
+    )
+    recording_id = create_recording(tmp_path, {descriptor.stream_id: descriptor})
+    append_recording_frame(
+        tmp_path,
+        recording_id,
+        frame_factory(descriptor, timestamp_ns=1_000_000_000, seq=1),
+        frame_index=1,
+    )
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=1_100_000_000,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 1},
+    )
+
+    export_started = threading.Event()
+    release_export = threading.Event()
+    calls = 0
+
+    def blocking_export(request, reader, output_root_dir, progress_fn):
+        nonlocal calls
+        calls += 1
+        export_started.set()
+        release_export.wait(1.0)
+        progress_fn(request.streams[0].stream_id)
+        return Path(output_root_dir) / "unused"
+
+    monkeypatch.setattr(
+        "modlink_core.replay.export.export_single_recording",
+        blocking_export,
+    )
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+
+    request = ExportRequest(
+        mode=ExportMode.SINGLE,
+        recording_ids=(recording_id,),
+        streams=(StreamSelection(stream_id=descriptor.stream_id, format_id="signal_csv"),),
+    )
+    running_job = backend.start_export(request).result(1.0)
+    queued_job = backend.start_export(request).result(1.0)
+    assert export_started.wait(1.0)
+
+    backend.shutdown(timeout_ms=50)
+    release_export.set()
+    running = _wait_for_job(backend, running_job.job_id, timeout=2.0)
+    queued = _wait_for_job(backend, queued_job.job_id, timeout=2.0)
+    backend.shutdown(timeout_ms=1000)
+
+    assert running.state == "cancelled"
+    assert queued.state == "cancelled"
+    assert calls == 1
 
 
 def _build_settings(tmp_path: Path) -> SettingsStore:
@@ -359,7 +638,7 @@ def _wait_for_job(backend: ReplayBackend, job_id: str, *, timeout: float) -> Exp
     deadline = time.time() + timeout
     while time.time() < deadline:
         for job in backend.export_jobs():
-            if job.job_id == job_id and job.state in {"completed", "failed"}:
+            if job.job_id == job_id and job.state in {"completed", "failed", "cancelled"}:
                 return job
         time.sleep(0.01)
     raise AssertionError("export job did not finish before timeout")
@@ -457,3 +736,66 @@ def test_replay_backend_delete_recording_raises_for_unknown_id(tmp_path) -> None
             backend.delete_recording("rec_nonexistent").result(1.0)
     finally:
         backend.shutdown()
+
+
+def test_refresh_recordings_summary_includes_finalized_metadata(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", stream_key="s1", chunk_size=2)
+    recording_id = create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="finalized_test",
+    )
+    finalize_recording(
+        tmp_path,
+        recording_id,
+        started_at_ns=1_000_000_000,
+        stopped_at_ns=61_000_000_000,
+        status="completed",
+        frame_counts_by_stream={descriptor.stream_id: 100},
+    )
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+    try:
+        recordings = backend.refresh_recordings().result(5.0)
+    finally:
+        backend.shutdown()
+
+    assert len(recordings) == 1
+    summary: ReplayRecordingSummary = recordings[0]
+    assert summary.started_at_ns == 1_000_000_000
+    assert summary.duration_ns == 60_000_000_000
+    assert summary.status == "completed"
+    assert summary.total_frames == 100
+
+
+def test_refresh_recordings_summary_old_recording_graceful_degradation(
+    tmp_path,
+    descriptor_factory,
+) -> None:
+    descriptor = descriptor_factory(payload_type="signal", stream_key="s1", chunk_size=2)
+    create_recording(
+        tmp_path,
+        {descriptor.stream_id: descriptor},
+        recording_label="old_recording",
+    )
+    # No finalize_recording call — simulates a recording without finalized metadata
+
+    settings = _build_settings(tmp_path)
+    backend = ReplayBackend(settings=settings)
+    backend.start()
+    try:
+        recordings = backend.refresh_recordings().result(5.0)
+    finally:
+        backend.shutdown()
+
+    assert len(recordings) == 1
+    summary: ReplayRecordingSummary = recordings[0]
+    assert summary.started_at_ns is None
+    assert summary.duration_ns is None
+    assert summary.status is None
+    assert summary.total_frames is None

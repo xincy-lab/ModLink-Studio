@@ -104,6 +104,7 @@ class RecordingReader:
         self._duration_ns = max(0, self._end_ns - self._start_ns)
         self._markers = tuple(_parse_markers(marker_payload, self._start_ns))
         self._segments = tuple(_parse_segments(segment_payload, self._start_ns))
+        self._value_range_cache: dict[str, tuple[float, float]] = {}
 
     @property
     def root_dir(self) -> Path:
@@ -131,6 +132,25 @@ class RecordingReader:
     def experiment_name(self) -> str | None:
         value = self._manifest.get("experiment_name")
         return value if isinstance(value, str) else None
+
+    @property
+    def started_at_ns(self) -> int | None:
+        return self._manifest.get("started_at_ns")
+
+    @property
+    def stopped_at_ns(self) -> int | None:
+        return self._manifest.get("stopped_at_ns")
+
+    @property
+    def status(self) -> str | None:
+        return self._manifest.get("status")
+
+    @property
+    def frame_counts_by_stream(self) -> dict[str, int]:
+        cached = self._manifest.get("frame_counts_by_stream")
+        if isinstance(cached, dict):
+            return dict(cached)
+        return {sid: len(refs) for sid, refs in self._frames_by_stream.items()}
 
     @property
     def manifest(self) -> dict[str, Any]:
@@ -168,6 +188,42 @@ class RecordingReader:
 
     def frames_for_stream(self, stream_id: str) -> tuple[RecordedFrameRef, ...]:
         return self._frames_by_stream.get(stream_id, ())
+
+    def frames_in_range(
+        self, stream_id: str, start_ns: int, end_ns: int
+    ) -> tuple[RecordedFrameRef, ...]:
+        refs = self._frames_by_stream.get(stream_id)
+        if not refs:
+            return ()
+        return tuple(r for r in refs if start_ns <= r.relative_timestamp_ns < end_ns)
+
+    def markers_in_range(self, start_ns: int, end_ns: int) -> tuple[ReplayMarker, ...]:
+        return tuple(m for m in self._markers if start_ns <= m.timestamp_ns < end_ns)
+
+    def overlapping_segments(self, start_ns: int, end_ns: int) -> tuple[ReplaySegment, ...]:
+        return tuple(s for s in self._segments if s.start_ns < end_ns and s.end_ns > start_ns)
+
+    def stream_value_range(self, stream_id: str) -> tuple[float, float] | None:
+        if stream_id in self._value_range_cache:
+            return self._value_range_cache[stream_id]
+        refs = self._frames_by_stream.get(stream_id)
+        if not refs:
+            return None
+        global_min: float | None = None
+        global_max: float | None = None
+        for ref in refs:
+            envelope = self.load_frame(ref)
+            frame_min = float(envelope.data.min())
+            frame_max = float(envelope.data.max())
+            if global_min is None or frame_min < global_min:
+                global_min = frame_min
+            if global_max is None or frame_max > global_max:
+                global_max = frame_max
+        if global_min is None or global_max is None:
+            return None
+        result = (global_min, global_max)
+        self._value_range_cache[stream_id] = result
+        return result
 
     def load_frame(self, ref: RecordedFrameRef) -> FrameEnvelope:
         descriptor = self._descriptors[ref.stream_id]

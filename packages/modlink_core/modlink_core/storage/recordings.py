@@ -172,6 +172,51 @@ def read_recording(root_dir: Path, recording_id: str) -> dict[str, Any]:
     return read_json(_recording_dir(root_dir, recording_id) / "recording.json")
 
 
+def finalize_recording(
+    root_dir: Path,
+    recording_id: str,
+    *,
+    started_at_ns: int,
+    stopped_at_ns: int,
+    status: str,
+    frame_counts_by_stream: dict[str, int],
+) -> None:
+    """Finalize a recording by adding stop-time metadata to recording.json.
+
+    Reads the existing recording.json, merges in the 5 new fields, and writes back.
+
+    Args:
+        root_dir: Root storage directory
+        recording_id: Recording ID
+        started_at_ns: Start timestamp in nanoseconds
+        stopped_at_ns: Stop timestamp in nanoseconds
+        status: Recording status ("completed" or "failed")
+        frame_counts_by_stream: Dict mapping stream_id to frame count
+
+    Raises:
+        FileNotFoundError: If recording.json does not exist
+        ValueError: If status is not "completed" or "failed"
+    """
+    if status not in ("completed", "failed"):
+        raise ValueError(f"status must be 'completed' or 'failed', got {status!r}")
+
+    recording_dir = _recording_dir(root_dir, recording_id)
+    recording_json_path = recording_dir / "recording.json"
+
+    # Read existing manifest (will raise FileNotFoundError if not found)
+    manifest = read_json(recording_json_path)
+
+    # Merge in the 5 new fields
+    manifest["started_at_ns"] = started_at_ns
+    manifest["stopped_at_ns"] = stopped_at_ns
+    manifest["duration_ns"] = stopped_at_ns - started_at_ns
+    manifest["status"] = status
+    manifest["frame_counts_by_stream"] = frame_counts_by_stream
+
+    # Write back
+    write_json(recording_json_path, manifest)
+
+
 def read_recording_stream(root_dir: Path, recording_id: str, stream_id: str) -> dict[str, Any]:
     return read_json(_stream_dir(root_dir, recording_id, stream_id) / "stream.json")
 
