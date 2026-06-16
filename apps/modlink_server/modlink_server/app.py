@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -53,13 +54,33 @@ def create_app(
     return app
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="modlink-server",
+        description="Run the ModLink Studio HTTP server.",
+    )
+    parser.add_argument(
+        "--host",
+        default=DEFAULT_HOST,
+        help=f"Host interface to bind. Default: {DEFAULT_HOST}.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help=f"Port to bind. Default: {DEFAULT_PORT}.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     log_path = configure_host_logging(log_filename="modlink-server.log")
-    logger.info("Starting ModLink server on %s:%s", DEFAULT_HOST, DEFAULT_PORT)
+    logger.info("Starting ModLink server on %s:%s", args.host, args.port)
     logger.info("Server logs will be written to %s", log_path)
     uvicorn.run(
         create_app(),
-        host=DEFAULT_HOST,
-        port=DEFAULT_PORT,
+        host=args.host,
+        port=args.port,
         log_config=None,
     )
